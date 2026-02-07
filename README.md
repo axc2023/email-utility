@@ -1,26 +1,33 @@
-# PST Email Search
+# Email Search
 
-A macOS utility to parse Outlook PST files and index emails into a SQLite database for fast, full-text searching.
+A macOS utility to parse Outlook PST and OLM files and index emails into a SQLite database for fast, full-text searching.
 
 ## Features
 
-- Parse multiple PST files in batch
+- Parse multiple PST (Windows Outlook) and OLM (Mac Outlook) files in batch
 - Extract email metadata: subject, sender, recipients, dates, folder path, attachments
 - Index emails to SQLite with FTS5 full-text search
 - Simple keyword search with relevance scoring
 - Multiple output formats (table, JSON, detailed)
-- Progress tracking for large PST files
+- Progress tracking for large archive files
 - No external database server required - everything stored in a single file
+
+## Supported Formats
+
+| Format | Extension | Description |
+|--------|-----------|-------------|
+| PST | `.pst` | Windows Outlook Personal Storage Table |
+| OLM | `.olm` | Mac Outlook archive format |
 
 ## Requirements
 
 - macOS (or Linux)
 - Python 3.9+
-- libpst (for PST parsing)
+- libpst (for PST parsing only)
 
 ## Installation
 
-### 1. Install libpst (PST parsing library)
+### 1. Install libpst (for PST file support)
 
 On macOS with Homebrew:
 
@@ -33,6 +40,8 @@ On Linux (Ubuntu/Debian):
 ```bash
 sudo apt-get install pst-utils
 ```
+
+**Note:** OLM files don't require any external dependencies - they're parsed natively by Python.
 
 ### 2. Install the Python package
 
@@ -54,19 +63,25 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Index PST Files
+### Index Email Archives
 
-Parse and index one or more PST files:
+Parse and index PST and/or OLM files:
 
 ```bash
 # Index a single PST file
 pst-search index /path/to/mailbox.pst
 
-# Index multiple PST files
-pst-search index /path/to/file1.pst /path/to/file2.pst /path/to/file3.pst
+# Index a single OLM file
+pst-search index /path/to/archive.olm
+
+# Index multiple files (mixed formats supported)
+pst-search index /path/to/file1.pst /path/to/file2.olm /path/to/file3.pst
 
 # Index all PST files in a directory
-pst-search index /path/to/pst-files/*.pst
+pst-search index /path/to/archives/*.pst
+
+# Index all OLM files in a directory
+pst-search index /path/to/archives/*.olm
 
 # Recreate the database (delete existing data)
 pst-search index --recreate /path/to/mailbox.pst
@@ -125,7 +140,7 @@ All commands support these options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--database` / `-d` | pst_emails.db | SQLite database file path |
+| `--database` / `-d` | emails.db | SQLite database file path |
 
 ### Index Command Options
 
@@ -159,15 +174,15 @@ The following email fields are extracted and indexed:
 | `date_received` | text | Date email was received |
 | `body_text` | text | Plain text body (searchable) |
 | `body_html` | text | HTML body |
-| `folder_path` | text | Folder path in PST |
+| `folder_path` | text | Folder path in archive |
 | `attachments` | json | Attachment metadata |
 | `has_attachments` | integer | Has attachments flag |
 | `importance` | text | Email importance level |
-| `pst_file` | text | Source PST filename |
+| `pst_file` | text | Source archive filename |
 
 ## Troubleshooting
 
-### readpst command not found
+### readpst command not found (PST files only)
 
 Make sure libpst is installed:
 
@@ -185,7 +200,13 @@ Verify installation:
 readpst --version
 ```
 
-### Large PST files are slow to process
+### OLM file not parsing correctly
+
+OLM files are ZIP archives containing XML. If parsing fails:
+- Ensure the file is a valid OLM export from Outlook for Mac
+- Check that the file isn't corrupted (try opening in Finder)
+
+### Large files are slow to process
 
 - Increase the batch size: `--batch-size 1000`
 - Consider running on an SSD

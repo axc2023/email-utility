@@ -9,31 +9,32 @@ import click
 from tqdm import tqdm
 
 from .database import EmailDatabase, DatabaseError
+from .olm_parser import OLMParser, OLMParserError
 from .pst_parser import PSTParser, PSTParserError
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version="0.2.0")
 def main() -> None:
-    """PST Email Search - Parse Outlook PST files and search with SQLite."""
+    """Email Search - Parse Outlook PST/OLM files and search with SQLite."""
     pass
 
 
 @main.command()
-@click.argument("pst_files", nargs=-1, required=True, type=click.Path(exists=True))
-@click.option("--database", "-d", default="pst_emails.db", help="SQLite database file path")
+@click.argument("archive_files", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("--database", "-d", default="emails.db", help="SQLite database file path")
 @click.option("--batch-size", default=500, type=int, help="Batch size for bulk indexing")
 @click.option("--recreate", is_flag=True, help="Delete and recreate the database")
 def index(
-    pst_files: tuple[str, ...],
+    archive_files: tuple[str, ...],
     database: str,
     batch_size: int,
     recreate: bool,
 ) -> None:
     """
-    Parse PST files and index emails to SQLite database.
+    Parse PST/OLM files and index emails to SQLite database.
 
-    PST_FILES: One or more PST files to parse and index.
+    ARCHIVE_FILES: One or more PST or OLM files to parse and index.
     """
     try:
         db = EmailDatabase(database)
@@ -50,26 +51,30 @@ def index(
     total_success = 0
     total_errors = 0
 
-    # Process each PST file
-    for pst_path in pst_files:
-        pst_path = os.path.abspath(pst_path)
-        click.echo(f"\nProcessing: {pst_path}")
+    for archive_path in archive_files:
+        archive_path = os.path.abspath(archive_path)
+        file_ext = os.path.splitext(archive_path)[1].lower()
+        click.echo(f"\nProcessing: {archive_path}")
 
         try:
-            with PSTParser(pst_path) as parser:
-                # Get email count for progress bar
+            if file_ext == ".olm":
+                parser = OLMParser(archive_path)
+            elif file_ext == ".pst":
+                parser = PSTParser(archive_path)
+            else:
+                click.echo(f"Unsupported file type: {file_ext} (use .pst or .olm)", err=True)
+                continue
+
+            with parser:
                 email_count = parser.get_email_count()
                 click.echo(f"Found approximately {email_count} emails")
 
-                # Create progress bar
                 with tqdm(total=email_count, desc="Indexing", unit="emails") as pbar:
-                    # Create a generator that updates progress
                     def email_generator():  # type: ignore
                         for email in parser.parse_emails():
                             pbar.update(1)
                             yield email
 
-                    # Bulk index emails
                     success, errors = db.bulk_index_emails(
                         email_generator(),
                         batch_size=batch_size,
@@ -79,8 +84,8 @@ def index(
                 total_errors += errors
                 click.echo(f"Indexed {success} emails, {errors} errors")
 
-        except PSTParserError as e:
-            click.echo(f"Error parsing {pst_path}: {e}", err=True)
+        except (PSTParserError, OLMParserError) as e:
+            click.echo(f"Error parsing {archive_path}: {e}", err=True)
             continue
 
     click.echo(f"\nTotal: Indexed {total_success} emails, {total_errors} errors")
@@ -90,7 +95,7 @@ def index(
 
 @main.command()
 @click.argument("query")
-@click.option("--database", "-d", default="pst_emails.db", help="SQLite database file path")
+@click.option("--database", "-d", default="emails.db", help="SQLite database file path")
 @click.option("--size", "-n", default=20, type=int, help="Number of results to return")
 @click.option("--page", default=1, type=int, help="Page number (1-indexed)")
 @click.option(
@@ -182,7 +187,7 @@ def search(
 
 
 @main.command()
-@click.option("--database", "-d", default="pst_emails.db", help="SQLite database file path")
+@click.option("--database", "-d", default="emails.db", help="SQLite database file path")
 def stats(database: str) -> None:
     """Show statistics about the indexed emails."""
     if not os.path.exists(database):
@@ -224,7 +229,7 @@ def stats(database: str) -> None:
 
 @main.command()
 @click.argument("message_id")
-@click.option("--database", "-d", default="pst_emails.db", help="SQLite database file path")
+@click.option("--database", "-d", default="emails.db", help="SQLite database file path")
 def show(message_id: str, database: str) -> None:
     """
     Show full details of a specific email by message ID.
@@ -252,7 +257,7 @@ def show(message_id: str, database: str) -> None:
 
 
 @main.command()
-@click.option("--database", "-d", default="pst_emails.db", help="SQLite database file path")
+@click.option("--database", "-d", default="emails.db", help="SQLite database file path")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 def delete_db(database: str, yes: bool) -> None:
     """Delete the email database."""
