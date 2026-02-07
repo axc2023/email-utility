@@ -19,11 +19,34 @@ class PSTParserError(Exception):
     pass
 
 
+def _find_readpst() -> Optional[str]:
+    """Find the readpst executable path."""
+    import shutil as sh
+    
+    readpst_path = sh.which("readpst")
+    if readpst_path:
+        return readpst_path
+    
+    common_paths = [
+        "/opt/homebrew/bin/readpst",
+        "/usr/local/bin/readpst",
+        "/usr/bin/readpst",
+    ]
+    for path in common_paths:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    
+    return None
+
+
 def _check_readpst_installed() -> bool:
     """Check if readpst is installed and available."""
+    readpst = _find_readpst()
+    if not readpst:
+        return False
     try:
         result = subprocess.run(
-            ["readpst", "--version"],
+            [readpst, "--version"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -46,7 +69,8 @@ class PSTParser:
         Raises:
             PSTParserError: If readpst is not installed or file doesn't exist.
         """
-        if not _check_readpst_installed():
+        self._readpst_path = _find_readpst()
+        if not self._readpst_path:
             raise PSTParserError(
                 "readpst (libpst) is not installed. "
                 "On macOS, install with: brew install libpst\n"
@@ -80,7 +104,7 @@ class PSTParser:
         try:
             result = subprocess.run(
                 [
-                    "readpst",
+                    self._readpst_path,
                     "-e",
                     "-r",
                     "-o",
