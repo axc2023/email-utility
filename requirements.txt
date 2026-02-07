@@ -1,0 +1,14 @@
+# Core dependencies
+elasticsearch>=8.0.0
+click>=8.0.0
+tqdm>=4.0.0
+python-dateutil>=2.8.0
+
+# PST parsing - libpff Python bindings
+# Note: On macOS, you may need to install libpff first:
+#   brew install libpff
+# Then install the Python bindings
+libpff-python>=20211114
+
+# Alternative PST parsing library (fallback)
+# extract-msg>=0.36.0
