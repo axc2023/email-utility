@@ -36,14 +36,7 @@ sudo apt-get install pst-utils
 
 ### 2. Install Elasticsearch
 
-On macOS with Homebrew:
-
-```bash
-brew install elasticsearch
-brew services start elasticsearch
-```
-
-Or using Docker:
+**Option A: Using Docker (Recommended)**
 
 ```bash
 docker run -d --name elasticsearch \
@@ -52,6 +45,18 @@ docker run -d --name elasticsearch \
   -e "xpack.security.enabled=false" \
   elasticsearch:8.11.0
 ```
+
+**Option B: Using Homebrew Tap (macOS)**
+
+```bash
+brew tap elastic/tap
+brew install elastic/tap/elasticsearch-full
+brew services start elastic/tap/elasticsearch-full
+```
+
+**Option C: Direct Download**
+
+Download from https://www.elastic.co/downloads/elasticsearch and follow the installation instructions for your platform.
 
 ### 3. Install the Python package
 
@@ -178,8 +183,8 @@ Make sure Elasticsearch is running:
 # Check if Elasticsearch is running
 curl http://localhost:9200
 
-# Start Elasticsearch (Homebrew)
-brew services start elasticsearch
+# Start Elasticsearch (Homebrew Tap)
+brew services start elastic/tap/elasticsearch-full
 
 # Start Elasticsearch (Docker)
 docker start elasticsearch
