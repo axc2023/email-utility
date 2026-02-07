@@ -1,17 +1,16 @@
-"""PST file parser using libpff (pypff) library."""
+"""PST file parser using libpst (readpst command-line tool)."""
 
+import email
 import hashlib
 import os
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Generator, Optional
 
 from .models import EmailAttachment, EmailMessage
-
-# Try to import pypff, provide helpful error if not available
-try:
-    import pypff
-except ImportError:
-    pypff = None  # type: ignore
 
 
 class PSTParserError(Exception):
@@ -20,8 +19,22 @@ class PSTParserError(Exception):
     pass
 
 
+def _check_readpst_installed() -> bool:
+    """Check if readpst is installed and available."""
+    try:
+        result = subprocess.run(
+            ["readpst", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
+
+
 class PSTParser:
-    """Parser for Outlook PST files using libpff."""
+    """Parser for Outlook PST files using libpst (readpst)."""
 
     def __init__(self, pst_path: str):
         """
@@ -31,122 +44,205 @@ class PSTParser:
             pst_path: Path to the PST file to parse.
 
         Raises:
-            PSTParserError: If pypff is not installed or file doesn't exist.
+            PSTParserError: If readpst is not installed or file doesn't exist.
         """
-        if pypff is None:
+        if not _check_readpst_installed():
             raise PSTParserError(
-                "pypff (libpff-python) is not installed. "
-                "On macOS, install with: brew install libpff && pip install libpff-python"
+                "readpst (libpst) is not installed. "
+                "On macOS, install with: brew install libpst\n"
+                "On Linux (Ubuntu/Debian): sudo apt-get install pst-utils"
             )
 
         if not os.path.exists(pst_path):
             raise PSTParserError(f"PST file not found: {pst_path}")
 
-        self.pst_path = pst_path
+        self.pst_path = os.path.abspath(pst_path)
         self.pst_filename = os.path.basename(pst_path)
-        self._pff_file: Optional[pypff.file] = None
+        self._temp_dir: Optional[str] = None
+        self._extracted = False
 
     def __enter__(self) -> "PSTParser":
-        """Open the PST file."""
+        """Open the PST file (extract to temp directory)."""
         self.open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore
-        """Close the PST file."""
+        """Close the PST file (cleanup temp directory)."""
         self.close()
 
     def open(self) -> None:
-        """Open the PST file for reading."""
-        if pypff is None:
-            raise PSTParserError("pypff is not available")
+        """Extract the PST file to a temporary directory."""
+        if self._extracted:
+            return
+
+        self._temp_dir = tempfile.mkdtemp(prefix="pst_extract_")
 
         try:
-            self._pff_file = pypff.file()
-            self._pff_file.open(self.pst_path)
-        except Exception as e:
-            raise PSTParserError(f"Failed to open PST file: {e}") from e
+            result = subprocess.run(
+                [
+                    "readpst",
+                    "-e",
+                    "-r",
+                    "-o",
+                    self._temp_dir,
+                    self.pst_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3600,
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                raise PSTParserError(f"readpst failed: {error_msg}")
+
+            self._extracted = True
+
+        except subprocess.TimeoutExpired:
+            self.close()
+            raise PSTParserError("PST extraction timed out (exceeded 1 hour)")
+        except subprocess.SubprocessError as e:
+            self.close()
+            raise PSTParserError(f"Failed to run readpst: {e}") from e
 
     def close(self) -> None:
-        """Close the PST file."""
-        if self._pff_file is not None:
+        """Clean up the temporary directory."""
+        if self._temp_dir and os.path.exists(self._temp_dir):
             try:
-                self._pff_file.close()
+                shutil.rmtree(self._temp_dir)
             except Exception:
                 pass
-            self._pff_file = None
+        self._temp_dir = None
+        self._extracted = False
 
-    def _generate_message_id(self, message: "pypff.message", folder_path: str) -> str:
+    def _generate_message_id(
+        self, subject: str, sender: str, date_str: str, folder_path: str
+    ) -> str:
         """Generate a unique message ID based on message properties."""
-        # Create a hash from available message properties
         id_components = [
             self.pst_filename,
             folder_path,
-            str(message.subject or ""),
-            str(message.sender_name or ""),
-            str(message.delivery_time or ""),
+            subject,
+            sender,
+            date_str,
         ]
         id_string = "|".join(id_components)
         return hashlib.sha256(id_string.encode("utf-8")).hexdigest()[:32]
 
-    def _parse_datetime(self, dt_value: Optional[datetime]) -> Optional[datetime]:
-        """Parse datetime from pypff, handling None values."""
-        if dt_value is None:
+    def _parse_datetime(self, date_str: Optional[str]) -> Optional[datetime]:
+        """Parse datetime from email date header."""
+        if not date_str:
             return None
         try:
-            # pypff returns datetime objects directly
-            if isinstance(dt_value, datetime):
-                return dt_value
-            return None
+            return parsedate_to_datetime(date_str)
         except Exception:
             return None
 
-    def _extract_recipients(self, message: "pypff.message") -> tuple[list[str], list[str], list[str]]:
-        """Extract recipients from a message."""
+    def _decode_header(self, header_value: Optional[str]) -> str:
+        """Decode an email header value."""
+        if not header_value:
+            return ""
+        try:
+            decoded_parts = email.header.decode_header(header_value)
+            result_parts = []
+            for part, charset in decoded_parts:
+                if isinstance(part, bytes):
+                    result_parts.append(part.decode(charset or "utf-8", errors="replace"))
+                else:
+                    result_parts.append(part)
+            return " ".join(result_parts)
+        except Exception:
+            return str(header_value)
+
+    def _extract_recipients(
+        self, msg: email.message.Message
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Extract recipients from an email message."""
         to_list: list[str] = []
         cc_list: list[str] = []
         bcc_list: list[str] = []
 
-        try:
-            num_recipients = message.number_of_recipients
-            for i in range(num_recipients):
-                recipient = message.get_recipient(i)
-                if recipient is None:
-                    continue
+        to_header = msg.get("To", "")
+        if to_header:
+            to_list = [self._decode_header(addr.strip()) for addr in to_header.split(",")]
 
-                # Get recipient name and email
-                name = recipient.name or ""
-                email = recipient.email_address or ""
-                recipient_str = f"{name} <{email}>" if name and email else (name or email)
+        cc_header = msg.get("Cc", "")
+        if cc_header:
+            cc_list = [self._decode_header(addr.strip()) for addr in cc_header.split(",")]
 
-                # Get recipient type (TO, CC, BCC)
-                recipient_type = getattr(recipient, "type", 1)
-                if recipient_type == 1:  # TO
-                    to_list.append(recipient_str)
-                elif recipient_type == 2:  # CC
-                    cc_list.append(recipient_str)
-                elif recipient_type == 3:  # BCC
-                    bcc_list.append(recipient_str)
-                else:
-                    to_list.append(recipient_str)
-        except Exception:
-            pass
+        bcc_header = msg.get("Bcc", "")
+        if bcc_header:
+            bcc_list = [self._decode_header(addr.strip()) for addr in bcc_header.split(",")]
 
         return to_list, cc_list, bcc_list
 
-    def _extract_attachments(self, message: "pypff.message") -> list[EmailAttachment]:
-        """Extract attachment metadata from a message."""
-        attachments: list[EmailAttachment] = []
+    def _extract_body(self, msg: email.message.Message) -> tuple[str, str]:
+        """Extract plain text and HTML body from an email message."""
+        body_text = ""
+        body_html = ""
 
-        try:
-            num_attachments = message.number_of_attachments
-            for i in range(num_attachments):
-                attachment = message.get_attachment(i)
-                if attachment is None:
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                content_disposition = str(part.get("Content-Disposition", ""))
+
+                if "attachment" in content_disposition:
                     continue
 
-                filename = getattr(attachment, "name", None) or f"attachment_{i}"
-                size = getattr(attachment, "size", 0) or 0
-                content_type = getattr(attachment, "content_type", None)
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        continue
+
+                    charset = part.get_content_charset() or "utf-8"
+                    text = payload.decode(charset, errors="replace")
+
+                    if content_type == "text/plain" and not body_text:
+                        body_text = text
+                    elif content_type == "text/html" and not body_html:
+                        body_html = text
+                except Exception:
+                    continue
+        else:
+            try:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    charset = msg.get_content_charset() or "utf-8"
+                    text = payload.decode(charset, errors="replace")
+                    content_type = msg.get_content_type()
+                    if content_type == "text/html":
+                        body_html = text
+                    else:
+                        body_text = text
+            except Exception:
+                pass
+
+        return body_text, body_html
+
+    def _extract_attachments(self, msg: email.message.Message) -> list[EmailAttachment]:
+        """Extract attachment metadata from an email message."""
+        attachments: list[EmailAttachment] = []
+
+        if not msg.is_multipart():
+            return attachments
+
+        for part in msg.walk():
+            content_disposition = str(part.get("Content-Disposition", ""))
+
+            if "attachment" in content_disposition:
+                filename = part.get_filename()
+                if filename:
+                    filename = self._decode_header(filename)
+                else:
+                    filename = "unnamed_attachment"
+
+                try:
+                    payload = part.get_payload(decode=True)
+                    size = len(payload) if payload else 0
+                except Exception:
+                    size = 0
+
+                content_type = part.get_content_type()
 
                 attachments.append(
                     EmailAttachment(
@@ -155,48 +251,46 @@ class PSTParser:
                         content_type=content_type,
                     )
                 )
-        except Exception:
-            pass
 
         return attachments
 
-    def _parse_message(self, message: "pypff.message", folder_path: str) -> Optional[EmailMessage]:
-        """Parse a single message into an EmailMessage object."""
+    def _parse_eml_file(self, eml_path: str, folder_path: str) -> Optional[EmailMessage]:
+        """Parse a single .eml file into an EmailMessage object."""
         try:
-            # Extract basic properties
-            subject = message.subject or ""
-            sender_name = message.sender_name or ""
-            sender_email = getattr(message, "sender_email_address", "") or ""
+            with open(eml_path, "rb") as f:
+                msg = email.message_from_binary_file(f)
 
-            # Extract body
-            body_text = ""
-            body_html = ""
-            try:
-                body_text = message.plain_text_body or ""
-            except Exception:
-                pass
-            try:
-                body_html = message.html_body or ""
-            except Exception:
-                pass
+            subject = self._decode_header(msg.get("Subject", ""))
+            from_header = self._decode_header(msg.get("From", ""))
 
-            # Extract dates
-            date_sent = self._parse_datetime(getattr(message, "client_submit_time", None))
-            date_received = self._parse_datetime(getattr(message, "delivery_time", None))
+            sender_name = from_header
+            sender_email = ""
+            if "<" in from_header and ">" in from_header:
+                parts = from_header.split("<")
+                sender_name = parts[0].strip().strip('"')
+                sender_email = parts[1].rstrip(">").strip()
+            elif "@" in from_header:
+                sender_email = from_header
+                sender_name = from_header.split("@")[0]
 
-            # Extract recipients
-            to_list, cc_list, bcc_list = self._extract_recipients(message)
+            date_str = msg.get("Date", "")
+            date_sent = self._parse_datetime(date_str)
+            date_received = self._parse_datetime(msg.get("Received", ""))
 
-            # Extract attachments
-            attachments = self._extract_attachments(message)
+            to_list, cc_list, bcc_list = self._extract_recipients(msg)
+            body_text, body_html = self._extract_body(msg)
+            attachments = self._extract_attachments(msg)
 
-            # Get importance
-            importance_value = getattr(message, "importance", 1)
-            importance_map = {0: "low", 1: "normal", 2: "high"}
-            importance = importance_map.get(importance_value, "normal")
+            importance = "normal"
+            priority = msg.get("X-Priority", "") or msg.get("Importance", "")
+            if priority:
+                priority_lower = priority.lower()
+                if "1" in priority_lower or "high" in priority_lower:
+                    importance = "high"
+                elif "5" in priority_lower or "low" in priority_lower:
+                    importance = "low"
 
-            # Generate message ID
-            message_id = self._generate_message_id(message, folder_path)
+            message_id = self._generate_message_id(subject, from_header, date_str, folder_path)
 
             return EmailMessage(
                 message_id=message_id,
@@ -216,43 +310,32 @@ class PSTParser:
                 importance=importance,
                 pst_file=self.pst_filename,
             )
+
         except Exception as e:
-            # Log error but continue processing
-            print(f"Warning: Failed to parse message in {folder_path}: {e}")
+            print(f"Warning: Failed to parse {eml_path}: {e}")
             return None
 
-    def _process_folder(
-        self, folder: "pypff.folder", folder_path: str = ""
+    def _process_directory(
+        self, dir_path: str, folder_path: str = ""
     ) -> Generator[EmailMessage, None, None]:
-        """Recursively process a folder and its subfolders."""
+        """Recursively process a directory of extracted emails."""
         try:
-            folder_name = folder.name or "Unknown"
-            current_path = f"{folder_path}/{folder_name}" if folder_path else folder_name
+            dir_name = os.path.basename(dir_path)
+            current_path = f"{folder_path}/{dir_name}" if folder_path else dir_name
 
-            # Process messages in this folder
-            num_messages = folder.number_of_sub_messages
-            for i in range(num_messages):
-                try:
-                    message = folder.get_sub_message(i)
-                    if message is not None:
-                        email = self._parse_message(message, current_path)
-                        if email is not None:
-                            yield email
-                except Exception as e:
-                    print(f"Warning: Failed to process message {i} in {current_path}: {e}")
+            for item in sorted(os.listdir(dir_path)):
+                item_path = os.path.join(dir_path, item)
 
-            # Process subfolders recursively
-            num_subfolders = folder.number_of_sub_folders
-            for i in range(num_subfolders):
-                try:
-                    subfolder = folder.get_sub_folder(i)
-                    if subfolder is not None:
-                        yield from self._process_folder(subfolder, current_path)
-                except Exception as e:
-                    print(f"Warning: Failed to process subfolder {i} in {current_path}: {e}")
+                if os.path.isfile(item_path) and item.lower().endswith(".eml"):
+                    email_msg = self._parse_eml_file(item_path, current_path)
+                    if email_msg is not None:
+                        yield email_msg
+
+                elif os.path.isdir(item_path):
+                    yield from self._process_directory(item_path, current_path)
 
         except Exception as e:
-            print(f"Warning: Failed to process folder {folder_path}: {e}")
+            print(f"Warning: Failed to process directory {dir_path}: {e}")
 
     def parse_emails(self) -> Generator[EmailMessage, None, None]:
         """
@@ -262,17 +345,19 @@ class PSTParser:
             EmailMessage objects for each email in the PST file.
 
         Raises:
-            PSTParserError: If the PST file is not open.
+            PSTParserError: If the PST file is not extracted.
         """
-        if self._pff_file is None:
+        if not self._extracted or not self._temp_dir:
             raise PSTParserError("PST file is not open. Call open() first.")
 
-        try:
-            root_folder = self._pff_file.get_root_folder()
-            if root_folder is not None:
-                yield from self._process_folder(root_folder)
-        except Exception as e:
-            raise PSTParserError(f"Failed to parse PST file: {e}") from e
+        for item in sorted(os.listdir(self._temp_dir)):
+            item_path = os.path.join(self._temp_dir, item)
+            if os.path.isdir(item_path):
+                yield from self._process_directory(item_path)
+            elif item.lower().endswith(".eml"):
+                email_msg = self._parse_eml_file(item_path, "")
+                if email_msg is not None:
+                    yield email_msg
 
     def get_email_count(self) -> int:
         """
@@ -281,28 +366,13 @@ class PSTParser:
         Returns:
             Estimated number of emails.
         """
-        if self._pff_file is None:
+        if not self._extracted or not self._temp_dir:
             raise PSTParserError("PST file is not open. Call open() first.")
 
         count = 0
-
-        def count_messages(folder: "pypff.folder") -> int:
-            nonlocal count
-            try:
-                count += folder.number_of_sub_messages
-                for i in range(folder.number_of_sub_folders):
-                    subfolder = folder.get_sub_folder(i)
-                    if subfolder is not None:
-                        count_messages(subfolder)
-            except Exception:
-                pass
-            return count
-
-        try:
-            root_folder = self._pff_file.get_root_folder()
-            if root_folder is not None:
-                count_messages(root_folder)
-        except Exception:
-            pass
+        for root, _dirs, files in os.walk(self._temp_dir):
+            for f in files:
+                if f.lower().endswith(".eml"):
+                    count += 1
 
         return count

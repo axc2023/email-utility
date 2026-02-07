@@ -16,22 +16,22 @@ A macOS utility to parse Outlook PST files and index emails into Elasticsearch f
 - macOS (or Linux)
 - Python 3.9+
 - Elasticsearch 8.x
-- libpff (for PST parsing)
+- libpst (for PST parsing)
 
 ## Installation
 
-### 1. Install libpff (PST parsing library)
+### 1. Install libpst (PST parsing library)
 
 On macOS with Homebrew:
 
 ```bash
-brew install libpff
+brew install libpst
 ```
 
 On Linux (Ubuntu/Debian):
 
 ```bash
-sudo apt-get install libpff-dev
+sudo apt-get install pst-utils
 ```
 
 ### 2. Install Elasticsearch
@@ -185,25 +185,22 @@ brew services start elasticsearch
 docker start elasticsearch
 ```
 
-### libpff-python installation fails
+### readpst command not found
 
-On macOS, you may need to install libpff first:
+Make sure libpst is installed:
 
 ```bash
-brew install libpff
-pip install libpff-python
+# macOS
+brew install libpst
+
+# Linux (Ubuntu/Debian)
+sudo apt-get install pst-utils
 ```
 
-If pip installation fails, try building from source:
+Verify installation:
 
 ```bash
-git clone https://github.com/libyal/libpff.git
-cd libpff
-./synclibs.sh
-./autogen.sh
-./configure --enable-python
-make
-sudo make install
+readpst --version
 ```
 
 ### Large PST files are slow to process
