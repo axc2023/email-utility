@@ -2,6 +2,7 @@
 
 import email
 import hashlib
+import mailbox
 import os
 import shutil
 import subprocess
@@ -22,11 +23,11 @@ class PSTParserError(Exception):
 def _find_readpst() -> Optional[str]:
     """Find the readpst executable path."""
     import shutil as sh
-    
+
     readpst_path = sh.which("readpst")
     if readpst_path:
         return readpst_path
-    
+
     common_paths = [
         "/opt/homebrew/bin/readpst",
         "/usr/local/bin/readpst",
@@ -35,25 +36,8 @@ def _find_readpst() -> Optional[str]:
     for path in common_paths:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
-    
+
     return None
-
-
-def _check_readpst_installed() -> bool:
-    """Check if readpst is installed and available."""
-    readpst = _find_readpst()
-    if not readpst:
-        return False
-    try:
-        result = subprocess.run(
-            [readpst, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
 
 
 class PSTParser:
@@ -105,7 +89,6 @@ class PSTParser:
             result = subprocess.run(
                 [
                     self._readpst_path,
-                    "-e",
                     "-r",
                     "-o",
                     self._temp_dir,
@@ -278,12 +261,11 @@ class PSTParser:
 
         return attachments
 
-    def _parse_eml_file(self, eml_path: str, folder_path: str) -> Optional[EmailMessage]:
-        """Parse a single .eml file into an EmailMessage object."""
+    def _parse_email_message(
+        self, msg: email.message.Message, folder_path: str
+    ) -> Optional[EmailMessage]:
+        """Parse an email message into an EmailMessage object."""
         try:
-            with open(eml_path, "rb") as f:
-                msg = email.message_from_binary_file(f)
-
             subject = self._decode_header(msg.get("Subject", ""))
             from_header = self._decode_header(msg.get("From", ""))
 
@@ -336,8 +318,22 @@ class PSTParser:
             )
 
         except Exception as e:
-            print(f"Warning: Failed to parse {eml_path}: {e}")
+            print(f"Warning: Failed to parse email: {e}")
             return None
+
+    def _parse_mbox_file(
+        self, mbox_path: str, folder_path: str
+    ) -> Generator[EmailMessage, None, None]:
+        """Parse an mbox file and yield EmailMessage objects."""
+        try:
+            mbox = mailbox.mbox(mbox_path)
+            for msg in mbox:
+                email_msg = self._parse_email_message(msg, folder_path)
+                if email_msg is not None:
+                    yield email_msg
+            mbox.close()
+        except Exception as e:
+            print(f"Warning: Failed to parse mbox {mbox_path}: {e}")
 
     def _process_directory(
         self, dir_path: str, folder_path: str = ""
@@ -350,10 +346,15 @@ class PSTParser:
             for item in sorted(os.listdir(dir_path)):
                 item_path = os.path.join(dir_path, item)
 
-                if os.path.isfile(item_path) and item.lower().endswith(".eml"):
-                    email_msg = self._parse_eml_file(item_path, current_path)
-                    if email_msg is not None:
-                        yield email_msg
+                if os.path.isfile(item_path):
+                    if item == "mbox" or item.endswith(".mbox"):
+                        yield from self._parse_mbox_file(item_path, current_path)
+                    elif item.lower().endswith(".eml"):
+                        with open(item_path, "rb") as f:
+                            msg = email.message_from_binary_file(f)
+                        email_msg = self._parse_email_message(msg, current_path)
+                        if email_msg is not None:
+                            yield email_msg
 
                 elif os.path.isdir(item_path):
                     yield from self._process_directory(item_path, current_path)
@@ -378,10 +379,15 @@ class PSTParser:
             item_path = os.path.join(self._temp_dir, item)
             if os.path.isdir(item_path):
                 yield from self._process_directory(item_path)
-            elif item.lower().endswith(".eml"):
-                email_msg = self._parse_eml_file(item_path, "")
-                if email_msg is not None:
-                    yield email_msg
+            elif os.path.isfile(item_path):
+                if item == "mbox" or item.endswith(".mbox"):
+                    yield from self._parse_mbox_file(item_path, "")
+                elif item.lower().endswith(".eml"):
+                    with open(item_path, "rb") as f:
+                        msg = email.message_from_binary_file(f)
+                    email_msg = self._parse_email_message(msg, "")
+                    if email_msg is not None:
+                        yield email_msg
 
     def get_email_count(self) -> int:
         """
@@ -396,7 +402,15 @@ class PSTParser:
         count = 0
         for root, _dirs, files in os.walk(self._temp_dir):
             for f in files:
-                if f.lower().endswith(".eml"):
+                file_path = os.path.join(root, f)
+                if f == "mbox" or f.endswith(".mbox"):
+                    try:
+                        mbox = mailbox.mbox(file_path)
+                        count += len(mbox)
+                        mbox.close()
+                    except Exception:
+                        pass
+                elif f.lower().endswith(".eml"):
                     count += 1
 
         return count
