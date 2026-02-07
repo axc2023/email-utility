@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pst-email-search"
 version = "0.1.0"
-description = "A utility to parse Outlook PST files and index emails into Elasticsearch for searching"
+description = "A utility to parse Outlook PST files and index emails into SQLite for searching"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -24,10 +24,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "elasticsearch>=8.0.0",
     "click>=8.0.0",
     "tqdm>=4.0.0",
-    "python-dateutil>=2.8.0",
 ]
 
 [project.optional-dependencies]

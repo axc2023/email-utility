@@ -1,10 +1,11 @@
 # Core dependencies
-elasticsearch>=8.0.0
 click>=8.0.0
 tqdm>=4.0.0
-python-dateutil>=2.8.0
 
 # PST parsing uses libpst (readpst command-line tool)
 # Install on macOS: brew install libpst
 # Install on Linux: sudo apt-get install pst-utils
 # No Python package needed - uses subprocess to call readpst
+
+# SQLite is included in Python standard library
+# FTS5 is enabled by default in Python 3.9+

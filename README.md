@@ -1,21 +1,21 @@
 # PST Email Search
 
-A macOS utility to parse Outlook PST files and index emails into Elasticsearch for fast, full-text searching.
+A macOS utility to parse Outlook PST files and index emails into a SQLite database for fast, full-text searching.
 
 ## Features
 
 - Parse multiple PST files in batch
 - Extract email metadata: subject, sender, recipients, dates, folder path, attachments
-- Index emails to Elasticsearch with optimized mappings for search
+- Index emails to SQLite with FTS5 full-text search
 - Simple keyword search with relevance scoring
 - Multiple output formats (table, JSON, detailed)
 - Progress tracking for large PST files
+- No external database server required - everything stored in a single file
 
 ## Requirements
 
 - macOS (or Linux)
 - Python 3.9+
-- Elasticsearch 8.x
 - libpst (for PST parsing)
 
 ## Installation
@@ -34,36 +34,12 @@ On Linux (Ubuntu/Debian):
 sudo apt-get install pst-utils
 ```
 
-### 2. Install Elasticsearch
-
-**Option A: Using Docker (Recommended)**
-
-```bash
-docker run -d --name elasticsearch \
-  -p 9200:9200 \
-  -e "discovery.type=single-node" \
-  -e "xpack.security.enabled=false" \
-  elasticsearch:8.11.0
-```
-
-**Option B: Using Homebrew Tap (macOS)**
-
-```bash
-brew tap elastic/tap
-brew install elastic/tap/elasticsearch-full
-brew services start elastic/tap/elasticsearch-full
-```
-
-**Option C: Direct Download**
-
-Download from https://www.elastic.co/downloads/elasticsearch and follow the installation instructions for your platform.
-
-### 3. Install the Python package
+### 2. Install the Python package
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/pst-email-search.git
-cd pst-email-search
+git clone https://github.com/axc2023/email-utility.git
+cd email-utility
 
 # Create a virtual environment (recommended)
 python3 -m venv venv
@@ -92,11 +68,11 @@ pst-search index /path/to/file1.pst /path/to/file2.pst /path/to/file3.pst
 # Index all PST files in a directory
 pst-search index /path/to/pst-files/*.pst
 
-# Recreate the index (delete existing data)
-pst-search index --recreate-index /path/to/mailbox.pst
+# Recreate the database (delete existing data)
+pst-search index --recreate /path/to/mailbox.pst
 
-# Custom Elasticsearch settings
-pst-search index --host localhost --port 9200 --index my-emails /path/to/mailbox.pst
+# Custom database path
+pst-search index --database /path/to/my_emails.db /path/to/mailbox.pst
 ```
 
 ### Search Emails
@@ -118,12 +94,16 @@ pst-search search "budget" --format json
 
 # Detailed output with snippets
 pst-search search "contract" --format detailed
+
+# Use a specific database
+pst-search search "keyword" --database /path/to/my_emails.db
 ```
 
 ### View Statistics
 
 ```bash
 pst-search stats
+pst-search stats --database /path/to/my_emails.db
 ```
 
 ### Show Email Details
@@ -132,23 +112,35 @@ pst-search stats
 pst-search show <message_id>
 ```
 
-### Delete Index
+### Delete Database
 
 ```bash
-pst-search delete-index --yes
+pst-search delete-db --yes
+pst-search delete-db --database /path/to/my_emails.db --yes
 ```
 
 ## Configuration Options
 
-All commands support these Elasticsearch connection options:
+All commands support these options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--host` | localhost | Elasticsearch host |
-| `--port` | 9200 | Elasticsearch port |
-| `--username` / `-u` | None | Username for authentication |
-| `--password` / `-p` | None | Password for authentication |
-| `--index` / `-i` | pst-emails | Index name |
+| `--database` / `-d` | pst_emails.db | SQLite database file path |
+
+### Index Command Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--batch-size` | 500 | Batch size for bulk indexing |
+| `--recreate` | False | Delete and recreate the database |
+
+### Search Command Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--size` / `-n` | 20 | Number of results to return |
+| `--page` | 1 | Page number (1-indexed) |
+| `--format` / `-f` | table | Output format (table, json, detailed) |
 
 ## Indexed Fields
 
@@ -156,39 +148,24 @@ The following email fields are extracted and indexed:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `message_id` | keyword | Unique identifier |
+| `message_id` | text | Unique identifier |
 | `subject` | text | Email subject (searchable) |
-| `sender` | text | Sender name |
-| `sender_email` | keyword | Sender email address |
-| `recipients_to` | text | TO recipients |
+| `sender` | text | Sender name (searchable) |
+| `sender_email` | text | Sender email address (searchable) |
+| `recipients_to` | text | TO recipients (searchable) |
 | `recipients_cc` | text | CC recipients |
 | `recipients_bcc` | text | BCC recipients |
-| `date_sent` | date | Date email was sent |
-| `date_received` | date | Date email was received |
+| `date_sent` | text | Date email was sent |
+| `date_received` | text | Date email was received |
 | `body_text` | text | Plain text body (searchable) |
-| `body_html` | text | HTML body (searchable) |
-| `folder_path` | keyword | Folder path in PST |
-| `attachments` | nested | Attachment metadata |
-| `has_attachments` | boolean | Has attachments flag |
-| `importance` | keyword | Email importance level |
-| `pst_file` | keyword | Source PST filename |
+| `body_html` | text | HTML body |
+| `folder_path` | text | Folder path in PST |
+| `attachments` | json | Attachment metadata |
+| `has_attachments` | integer | Has attachments flag |
+| `importance` | text | Email importance level |
+| `pst_file` | text | Source PST filename |
 
 ## Troubleshooting
-
-### Cannot connect to Elasticsearch
-
-Make sure Elasticsearch is running:
-
-```bash
-# Check if Elasticsearch is running
-curl http://localhost:9200
-
-# Start Elasticsearch (Homebrew Tap)
-brew services start elastic/tap/elasticsearch-full
-
-# Start Elasticsearch (Docker)
-docker start elasticsearch
-```
 
 ### readpst command not found
 
@@ -211,8 +188,15 @@ readpst --version
 ### Large PST files are slow to process
 
 - Increase the batch size: `--batch-size 1000`
-- Ensure Elasticsearch has enough memory
 - Consider running on an SSD
+- The first indexing takes time, but subsequent searches are fast
+
+### Search not finding expected results
+
+SQLite FTS5 uses a specific query syntax. For best results:
+- Use simple keywords: `pst-search search "meeting"`
+- Use quotes for phrases: `pst-search search '"project update"'`
+- Use OR for alternatives: `pst-search search "meeting OR conference"`
 
 ## License
 
